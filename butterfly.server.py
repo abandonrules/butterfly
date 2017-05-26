@@ -3,7 +3,7 @@
 
 # This file is part of butterfly
 #
-# butterfly Copyright (C) 2015  Florian Mounier
+# butterfly Copyright(C) 2015-2017 Florian Mounier
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -20,7 +20,11 @@
 import tornado.options
 import tornado.ioloop
 import tornado.httpserver
-import tornado_systemd
+try:
+    from tornado_systemd import SystemdHTTPServer as HTTPServer
+except ImportError:
+    from tornado.httpserver import HTTPServer
+
 import logging
 import webbrowser
 import uuid
@@ -40,6 +44,9 @@ tornado.options.define("unminified", default=False,
 
 tornado.options.define("host", default='localhost', help="Server host")
 tornado.options.define("port", default=57575, type=int, help="Server port")
+tornado.options.define("keepalive_interval", default=30, type=int,
+                       help="Interval between ping packets sent from server "
+                       "to client (in seconds)")
 tornado.options.define("one_shot", default=False,
                        help="Run a one-shot instance. Quit at term close")
 tornado.options.define("shell", help="Shell to execute at login")
@@ -48,8 +55,18 @@ tornado.options.define("cmd",
                        help="Command to run instead of shell, f.i.: 'ls -l'")
 tornado.options.define("unsecure", default=False,
                        help="Don't use ssl not recommended")
+tornado.options.define("i-hereby-declare-i-dont-want-any-security-whatsoever",
+                       default=False,
+                       help="Remove all security and warnings. There are some "
+                       "use cases for that. Use this if you really know what "
+                       "you are doing.")
 tornado.options.define("login", default=False,
                        help="Use login screen at start")
+tornado.options.define("pam_profile", default="", type=str,
+                       help="When --login=True provided and running as ROOT, "
+                       "use PAM with the specified PAM profile for "
+                       "authentication and then execute the user's default "
+                       "shell. Will override --shell.")
 tornado.options.define("force_unicode_width",
                        default=False,
                        help="Force all unicode characters to the same width."
@@ -64,6 +81,10 @@ tornado.options.define("generate_current_user_pkcs", default=False,
 tornado.options.define("generate_user_pkcs", default='',
                        help="Generate user pfx for client authentication "
                        "(Must be root to create for another user)")
+tornado.options.define("uri_root_path", default='',
+                       help="Sets the servier root path: "
+                       "example.com/<uri_root_path>/static/")
+
 
 if os.getuid() == 0:
     ev = os.getenv('XDG_CONFIG_DIRS', '/etc')
@@ -120,6 +141,9 @@ log = logging.getLogger('butterfly')
 host = options.host
 port = options.port
 
+if options.i_hereby_declare_i_dont_want_any_security_whatsoever:
+    options.unsecure = True
+
 
 if not os.path.exists(options.ssl_dir):
     os.makedirs(options.ssl_dir)
@@ -127,6 +151,7 @@ if not os.path.exists(options.ssl_dir):
 
 def to_abs(file):
     return os.path.join(options.ssl_dir, file)
+
 
 ca, ca_key, cert, cert_key, pkcs12 = map(to_abs, [
     'butterfly_ca.crt', 'butterfly_ca.key',
@@ -152,6 +177,7 @@ def read(file):
     print('Reading %s' % file)
     with open(file, 'rb') as fd:
         return fd.read()
+
 
 if options.generate_certs:
     from OpenSSL import crypto
@@ -183,6 +209,11 @@ if options.generate_certs:
     server_pk.generate_key(crypto.TYPE_RSA, 2048)
     server_cert = crypto.X509()
     server_cert.get_subject().CN = host
+    alt = 'subjectAltName'
+    value = 'DNS:%s' % host
+    server_cert.add_extensions([crypto.X509Extension(
+        alt.encode('utf-8'), False, value.encode('utf-8'))])
+
     fill_fields(server_cert.get_subject())
     server_cert.set_serial_number(uuid.uuid4().int)
     server_cert.gmtime_adj_notBefore(0)  # From now
@@ -295,11 +326,10 @@ else:
 from butterfly import application
 application.butterfly_dir = butterfly_dir
 log.info('Starting server')
-http_server = tornado_systemd.SystemdHTTPServer(
-    application, ssl_options=ssl_opts)
+http_server = HTTPServer(application, ssl_options=ssl_opts)
 http_server.listen(port, address=host)
 
-if http_server.systemd:
+if getattr(http_server, 'systemd', False):
     os.environ.pop('LISTEN_PID')
     os.environ.pop('LISTEN_FDS')
 

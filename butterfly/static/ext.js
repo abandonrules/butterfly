@@ -1,5 +1,5 @@
 (function() {
-  var Popup, Selection, _set_theme_href, _theme, alt, cancel, clean_ansi, copy, ctrl, first, nextLeaf, popup, previousLeaf, selection, setAlarm, virtualInput,
+  var Popup, Selection, _set_theme_href, _theme, alt, cancel, clean_ansi, copy, ctrl, first, histSize, linkify, maybePack, nextLeaf, packSize, popup, previousLeaf, selection, setAlarm, tid, virtualInput, walk,
     indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
   clean_ansi = function(data) {
@@ -80,9 +80,9 @@
       } else {
         alert(note + '\n' + message);
       }
-      return butterfly.ws.removeEventListener('message', alarm);
+      return butterfly.ws.shell.removeEventListener('message', alarm);
     };
-    butterfly.ws.addEventListener('message', alarm);
+    butterfly.ws.shell.addEventListener('message', alarm);
     return butterfly.body.classList.add('alarm');
   };
 
@@ -142,11 +142,19 @@
   });
 
   addEventListener('paste', function(e) {
-    var data;
+    var data, send, size;
     butterfly.bell("pasted");
     data = e.clipboardData.getData('text/plain');
     data = data.replace(/\r\n/g, '\n').replace(/\n/g, '\r');
-    butterfly.send(data);
+    size = 1024;
+    send = function() {
+      butterfly.send(data.substring(0, size));
+      data = data.substring(size);
+      if (data.length) {
+        return setTimeout(send, 25);
+      }
+    };
+    send();
     return e.preventDefault();
   });
 
@@ -156,12 +164,106 @@
     }
   });
 
+  Terminal.on('change', function(line) {
+    if (indexOf.call(line.classList, 'extended') >= 0) {
+      return line.addEventListener('click', (function(line) {
+        return function() {
+          var after, before;
+          if (indexOf.call(line.classList, 'expanded') >= 0) {
+            return line.classList.remove('expanded');
+          } else {
+            before = line.getBoundingClientRect().height;
+            line.classList.add('expanded');
+            after = line.getBoundingClientRect().height;
+            return document.body.scrollTop += after - before;
+          }
+        };
+      })(line));
+    }
+  });
+
+  walk = function(node, callback) {
+    var child, j, len1, ref, results;
+    ref = node.childNodes;
+    results = [];
+    for (j = 0, len1 = ref.length; j < len1; j++) {
+      child = ref[j];
+      callback.call(child);
+      results.push(walk(child, callback));
+    }
+    return results;
+  };
+
+  linkify = function(text) {
+    var emailAddressPattern, pseudoUrlPattern, urlPattern;
+    urlPattern = /\b(?:https?|ftp):\/\/[a-z0-9-+&@#\/%?=~_|!:,.;]*[a-z0-9-+&@#\/%=~_|]/gim;
+    pseudoUrlPattern = /(^|[^\/])(www\.[\S]+(\b|$))/gim;
+    emailAddressPattern = /[\w.]+@[a-zA-Z_-]+?(?:\.[a-zA-Z]{2,6})+/gim;
+    return text.replace(urlPattern, '<a href="$&">$&</a>').replace(pseudoUrlPattern, '$1<a href="http://$2">$2</a>').replace(emailAddressPattern, '<a href="mailto:$&">$&</a>');
+  };
+
+  Terminal.on('change', function(line) {
+    return walk(line, function() {
+      var linkified, newNode;
+      if (this.nodeType === 3) {
+        linkified = linkify(this.nodeValue);
+        if (linkified !== this.nodeValue) {
+          newNode = document.createElement('span');
+          newNode.innerHTML = linkified;
+          this.parentElement.replaceChild(newNode, this);
+          return true;
+        }
+      }
+    });
+  });
+
   document.addEventListener('keydown', function(e) {
     if (!(e.altKey && e.keyCode === 79)) {
       return true;
     }
-    open(location.href);
+    open(location.origin);
     return cancel(e);
+  });
+
+  tid = null;
+
+  packSize = 1000;
+
+  histSize = 100;
+
+  maybePack = function() {
+    var hist, i, j, pack, packfrag, ref;
+    if (!(butterfly.term.childElementCount > packSize + butterfly.rows)) {
+      return;
+    }
+    hist = document.getElementById('packed');
+    packfrag = document.createDocumentFragment('fragment');
+    for (i = j = 0, ref = packSize; 0 <= ref ? j <= ref : j >= ref; i = 0 <= ref ? ++j : --j) {
+      packfrag.appendChild(butterfly.term.firstChild);
+    }
+    pack = document.createElement('div');
+    pack.classList.add('pack');
+    pack.appendChild(packfrag);
+    hist.appendChild(pack);
+    if (hist.childElementCount > histSize) {
+      hist.firstChild.remove();
+    }
+    return tid = setTimeout(maybePack);
+  };
+
+  Terminal.on('refresh', function() {
+    if (tid) {
+      clearTimeout(tid);
+    }
+    return maybePack();
+  });
+
+  Terminal.on('clear', function() {
+    var hist, newHist;
+    newHist = document.createElement('div');
+    newHist.id = 'packed';
+    hist = document.getElementById('packed');
+    return butterfly.body.replaceChild(newHist, hist);
   });
 
   Popup = (function() {
@@ -319,13 +421,13 @@
 
     Selection.prototype.go = function(n) {
       var index;
-      index = butterfly.children.indexOf(this.startLine) + n;
-      if (!((0 <= index && index < butterfly.children.length))) {
+      index = Array.prototype.indexOf.call(butterfly.term.childNodes, this.startLine) + n;
+      if (!((0 <= index && index < butterfly.term.childElementCount))) {
         return;
       }
-      while (!butterfly.children[index].textContent.match(/\S/)) {
+      while (!butterfly.term.childNodes[index].textContent.match(/\S/)) {
         index += n;
-        if (!((0 <= index && index < butterfly.children.length))) {
+        if (!((0 <= index && index < butterfly.term.childElementCount))) {
           return;
         }
       }
@@ -343,7 +445,7 @@
 
     Selection.prototype.selectLine = function(index) {
       var line, lineEnd, lineStart;
-      line = butterfly.children[index];
+      line = butterfly.term.childNodes[index];
       lineStart = {
         node: line.firstChild,
         offset: 0
@@ -443,7 +545,7 @@
   })();
 
   document.addEventListener('keydown', function(e) {
-    var ref, ref1;
+    var r, ref, ref1;
     if (ref = e.keyCode, indexOf.call([16, 17, 18, 19], ref) >= 0) {
       return true;
     }
@@ -480,8 +582,9 @@
       return cancel(e);
     }
     if (!selection && e.ctrlKey && e.shiftKey && e.keyCode === 38) {
+      r = Math.max(butterfly.term.childElementCount - butterfly.rows, 0);
       selection = new Selection();
-      selection.selectLine(butterfly.y - 1);
+      selection.selectLine(r + butterfly.y - 1);
       selection.apply();
       return cancel(e);
     }
